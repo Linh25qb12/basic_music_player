@@ -2,91 +2,122 @@ import 'dart:math';
 
 import 'package:music_player/models/lyric_word.dart';
 
-const int _minGapBetweenWordStartsMs = 48;
+const int _clusterThresholdMs = 80;
+
+const int _minStartGapMs = 110;
+
+const int _minWordDurationMs = 180;
 
 List<LyricWord> normalizeLyricWordTimings(
   List<LyricWord> words, {
   required int? nextLineStartMs,
 }) {
   if (words.isEmpty) return words;
-
   final n = words.length;
-  if (n == 1) {
-    final t0 = words.first.start.inMilliseconds;
-    return [words.first.copyWith(start: Duration(milliseconds: t0))];
+  if (n == 1) return List<LyricWord>.from(words);
+
+  final starts = List<int>.generate(n, (i) => words[i].start.inMilliseconds);
+  final weights = List<double>.generate(n, (i) => _wordWeight(words[i].text));
+
+  // 1) Phat hien va giai cac cluster.
+  var i = 0;
+  while (i < n) {
+    var j = i + 1;
+    while (j < n && starts[j] - starts[j - 1] <= _clusterThresholdMs) {
+      j++;
+    }
+
+    if (j - i > 1) {
+      _redistributeCluster(
+        starts: starts,
+        weights: weights,
+        clusterStart: i,
+        clusterEnd: j,
+        nextRealStartMs: j < n ? starts[j] : nextLineStartMs,
+      );
+    }
+    i = j;
   }
 
-  final ms = List<int>.generate(n, (i) => words[i].start.inMilliseconds);
+  // 2) Bao dam non-decreasing.
+  for (var k = 1; k < n; k++) {
+    if (starts[k] < starts[k - 1]) {
+      starts[k] = starts[k - 1];
+    }
+  }
 
-  _splitEqualTimestampRuns(ms, nextLineStartMs);
-  _enforceNonDecreasing(ms);
-  _enforceMinGap(ms, _minGapBetweenWordStartsMs);
+  // 3) Bao dam khoang cach toi thieu giua hai start lien tiep.
+  for (var k = 1; k < n; k++) {
+    final minNext = starts[k - 1] + _minStartGapMs;
+    if (starts[k] < minNext) {
+      starts[k] = minNext;
+    }
+  }
 
-  if (nextLineStartMs != null && ms.last >= nextLineStartMs) {
-    _compressToUpperBound(ms, nextLineStartMs - 1);
-    _enforceMinGap(ms, _minGapBetweenWordStartsMs);
-    _enforceNonDecreasing(ms);
-    if (ms.last >= nextLineStartMs) {
-      ms[n - 1] = nextLineStartMs - 1;
-      for (var k = n - 2; k >= 0; k--) {
-        final cap = ms[k + 1] - _minGapBetweenWordStartsMs;
-        if (ms[k] > cap) ms[k] = max(0, cap);
+  // 4) Cap theo dau dong sau, day lui ve neu vuot.
+  if (nextLineStartMs != null && starts[n - 1] >= nextLineStartMs) {
+    starts[n - 1] = max(starts[0], nextLineStartMs - 1);
+    for (var k = n - 2; k >= 0; k--) {
+      final upperCap = starts[k + 1] - _minStartGapMs;
+      if (starts[k] > upperCap) {
+        starts[k] = max(0, upperCap);
       }
-      _enforceNonDecreasing(ms);
+    }
+    for (var k = 1; k < n; k++) {
+      if (starts[k] < starts[k - 1]) {
+        starts[k] = starts[k - 1];
+      }
     }
   }
 
   return List<LyricWord>.generate(
     n,
-    (i) => words[i].copyWith(start: Duration(milliseconds: ms[i])),
+    (k) => words[k].copyWith(start: Duration(milliseconds: starts[k])),
   );
 }
 
-void _splitEqualTimestampRuns(List<int> ms, int? nextLineStartMs) {
-  var i = 0;
-  while (i < ms.length) {
-    var j = i + 1;
-    while (j < ms.length && ms[j] == ms[i]) {
-      j++;
-    }
-    if (j - i > 1) {
-      final nextBoundary =
-          j < ms.length ? ms[j] : (nextLineStartMs ?? ms[i] + 900);
-      final span = max(1, nextBoundary - ms[i]);
-      final count = j - i;
-      for (var k = 0; k < count; k++) {
-        ms[i + k] = ms[i] + ((span * k) / count).round();
-      }
-    }
-    i = j;
+void _redistributeCluster({
+  required List<int> starts,
+  required List<double> weights,
+  required int clusterStart,
+  required int clusterEnd,
+  required int? nextRealStartMs,
+}) {
+  final size = clusterEnd - clusterStart;
+  final clusterAnchor = starts[clusterStart];
+
+  // Diem ket cum: hoac dau cua tu thuc su tiep theo,
+  // hoac dau dong sau, hoac fallback theo so tu.
+  final desiredEnd =
+      nextRealStartMs ?? clusterAnchor + _minWordDurationMs * size;
+
+  // Bao dam khoang du dai de chua het cum.
+  final span = max(_minWordDurationMs * size, desiredEnd - clusterAnchor);
+
+  var totalWeight = 0.0;
+  for (var k = clusterStart; k < clusterEnd; k++) {
+    totalWeight += weights[k];
+  }
+
+  var cursor = clusterAnchor;
+  for (var k = clusterStart; k < clusterEnd; k++) {
+    starts[k] = cursor;
+    final share =
+        totalWeight > 0
+            ? (span * (weights[k] / totalWeight)).round()
+            : (span / size).round();
+    cursor += max(_minWordDurationMs, share);
   }
 }
 
-void _enforceNonDecreasing(List<int> ms) {
-  for (var k = 1; k < ms.length; k++) {
-    if (ms[k] < ms[k - 1]) {
-      ms[k] = ms[k - 1];
-    }
+double _wordWeight(String text) {
+  // Trong so dua tren so ky tu co nghia (loai khoang trang).
+  // Tu dai hon -> giu thoi gian tu mau lau hon.
+  var count = 0.0;
+  for (final code in text.runes) {
+    final ch = String.fromCharCode(code);
+    if (RegExp(r'\s').hasMatch(ch)) continue;
+    count += 1;
   }
-}
-
-void _enforceMinGap(List<int> ms, int minGapMs) {
-  for (var k = 1; k < ms.length; k++) {
-    final minNext = ms[k - 1] + minGapMs;
-    if (ms[k] < minNext) {
-      ms[k] = minNext;
-    }
-  }
-}
-
-void _compressToUpperBound(List<int> ms, int upperMs) {
-  final lo = ms.first;
-  final hi = ms.last;
-  if (hi <= lo || upperMs <= lo) return;
-  if (hi <= upperMs) return;
-
-  final scale = (upperMs - lo) / (hi - lo);
-  for (var k = 1; k < ms.length; k++) {
-    ms[k] = lo + ((ms[k] - lo) * scale).round();
-  }
+  return max(1.0, count);
 }
