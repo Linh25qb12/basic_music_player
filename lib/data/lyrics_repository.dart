@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:music_player/constants/media_urls.dart';
 import 'package:music_player/models/lyric_line.dart';
 import 'package:music_player/models/lyric_word.dart';
+import 'package:music_player/utils/lyric_timing_normalizer.dart';
 import 'package:xml/xml.dart';
 
 class LyricsRepository {
@@ -36,7 +37,17 @@ class LyricsRepository {
     for (var index = 0; index < parsed.length; index++) {
       final current = parsed[index];
       final nextLine = index + 1 < parsed.length ? parsed[index + 1] : null;
-      current.finalizeTimeline(nextLine);
+      final nextFirstMs =
+          nextLine?.words.isNotEmpty == true
+              ? nextLine!.words.first.start.inMilliseconds
+              : null;
+      final fixed = normalizeLyricWordTimings(
+        List<LyricWord>.from(current.words),
+        nextLineStartMs: nextFirstMs,
+      );
+      final updated = LyricLine(words: fixed);
+      updated.finalizeTimeline(nextLine);
+      parsed[index] = updated;
     }
     return parsed;
   }

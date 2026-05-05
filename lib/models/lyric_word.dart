@@ -1,6 +1,6 @@
 import 'dart:math';
 
-import 'package:flutter/material.dart';
+import 'package:characters/characters.dart';
 
 import 'lyric_character.dart';
 
@@ -10,6 +10,11 @@ class LyricWord {
   final String text;
   final Duration start;
   late Duration end;
+
+  LyricWord copyWith({String? text, Duration? start}) {
+    return LyricWord(text: text ?? this.text, start: start ?? this.start);
+  }
+
   final List<LyricCharacter> _chars = [];
   List<String> get characters =>
       _chars.map((char) => char.value).toList(growable: false);
@@ -19,34 +24,45 @@ class LyricWord {
     final characters = text.characters.toList(growable: false);
     if (characters.isEmpty) return;
 
-    final totalMs = max(1, (end - start).inMilliseconds);
-    final totalUnits = characters.fold<double>(
-      0,
-      (sum, char) => sum + _characterWeight(char),
-    );
-    var cursorMs = start.inMilliseconds;
+    final startMs = start.inMilliseconds;
+    final endMs = end.inMilliseconds;
+    final totalMs = max(1, endMs - startMs);
+    final n = characters.length;
 
-    for (var i = 0; i < characters.length; i++) {
-      final char = characters[i];
-      final isLast = i == characters.length - 1;
-      final unitRatio = totalUnits == 0
-          ? 1 / characters.length
-          : _characterWeight(char) / totalUnits;
-      var charSliceMs =
-          isLast ? (end.inMilliseconds - cursorMs) : (totalMs * unitRatio).round();
-      charSliceMs = max(16, charSliceMs);
-      final charStartMs = cursorMs;
-      final charEndMs = isLast
-          ? end.inMilliseconds
-          : min(end.inMilliseconds, charStartMs + charSliceMs);
+    final weights = characters.map(_characterWeight).toList();
+    final totalUnits = weights.fold<double>(0, (a, b) => a + b);
+
+    final edge = List<int>.filled(n + 1, 0);
+    if (totalUnits <= 0) {
+      for (var i = 1; i <= n; i++) {
+        edge[i] = ((totalMs * i) / n).round();
+      }
+    } else {
+      for (var i = 1; i <= n; i++) {
+        final cum = weights.sublist(0, i).fold<double>(0, (a, b) => a + b);
+        edge[i] = (totalMs * cum / totalUnits).round();
+      }
+    }
+    edge[n] = totalMs;
+
+    for (var i = 1; i <= n; i++) {
+      edge[i] = edge[i].clamp(0, totalMs);
+      if (edge[i] < edge[i - 1]) {
+        edge[i] = edge[i - 1];
+      }
+    }
+    edge[n] = totalMs;
+
+    for (var i = 0; i < n; i++) {
+      final charStartMs = startMs + edge[i];
+      final charEndMs = startMs + edge[i + 1];
       _chars.add(
         LyricCharacter(
-          value: char,
+          value: characters[i],
           start: Duration(milliseconds: charStartMs),
           end: Duration(milliseconds: max(charStartMs + 1, charEndMs)),
         ),
       );
-      cursorMs = max(charStartMs + 1, charEndMs);
     }
   }
 
@@ -64,7 +80,11 @@ class LyricWord {
     return (now - start).inMilliseconds / span.inMilliseconds;
   }
 
-  double characterProgressByIndex(Duration now, int index, {required bool smooth}) {
+  double characterProgressByIndex(
+    Duration now,
+    int index, {
+    required bool smooth,
+  }) {
     if (index < 0 || index >= _chars.length) return 0;
     final item = _chars[index];
     if (!smooth) {
@@ -75,6 +95,7 @@ class LyricWord {
     final span = item.end - item.start;
     if (span.inMilliseconds == 0) return 1;
     final raw = (now - item.start).inMilliseconds / span.inMilliseconds;
-    return Curves.easeInOutCubic.transform(raw.clamp(0.0, 1.0));
+
+    return raw.clamp(0.0, 1.0);
   }
 }

@@ -12,18 +12,12 @@ class LyricLine {
     for (var i = 0; i < words.length; i++) {
       final current = words[i];
 
-      Duration? nextGreaterStart;
-      for (var j = i + 1; j < words.length; j++) {
-        if (words[j].start > current.start) {
-          nextGreaterStart = words[j].start;
-          break;
-        }
-      }
-
+      final nextStartInLine =
+          i + 1 < words.length ? words[i + 1].start : null;
       final fallbackEnd = nextLine != null
           ? nextLine.words.first.start
           : current.start + const Duration(milliseconds: 900);
-      final targetEnd = nextGreaterStart ?? fallbackEnd;
+      final targetEnd = nextStartInLine ?? fallbackEnd;
       current.end = targetEnd > current.start
           ? targetEnd
           : current.start + const Duration(milliseconds: 180);

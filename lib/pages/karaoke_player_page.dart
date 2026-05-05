@@ -18,7 +18,9 @@ class KaraokePlayerPage extends StatefulWidget {
 
 class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     with SingleTickerProviderStateMixin {
-  static const double _lyricFontSize = 18;
+  static const double _lyricFontSize = 16;
+  static const Color _lyricBaseCharColor = Color(0xFFB8C5D6);
+  static const Duration _lyricLineSwitchDuration = Duration(milliseconds: 640);
 
   final AudioPlayer _player = AudioPlayer();
   final LyricsRepository _lyricsRepository = LyricsRepository();
@@ -28,7 +30,7 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
   StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<PlayerState>? _stateSub;
 
-  Duration _position = Duration.zero;
+  late final ValueNotifier<Duration> _positionNotifier;
   Duration _duration = Duration.zero;
   bool _isPlaying = false;
   bool _isLoading = true;
@@ -37,11 +39,11 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
   String? _error;
 
   List<LyricLine> _lines = const [];
-  int _activeLineIndex = -1;
 
   @override
   void initState() {
     super.initState();
+    _positionNotifier = ValueNotifier(Duration.zero);
     _discRotationController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 6),
@@ -63,14 +65,13 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
       _positionSub = _player
           .createPositionStream(
             steps: 900,
-            minPeriod: const Duration(milliseconds: 16),
-            maxPeriod: const Duration(milliseconds: 33),
+            minPeriod: const Duration(milliseconds: 20),
+            maxPeriod: const Duration(milliseconds: 40),
           )
           .listen((value) {
             if (!mounted) return;
             if (_isSeeking) return;
-            setState(() => _position = value);
-            _syncActiveLine(value);
+            _positionNotifier.value = value;
           });
 
       _stateSub = _player.playerStateStream.listen((value) {
@@ -90,17 +91,6 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
       if (mounted) {
         setState(() => _isLoading = false);
       }
-    }
-  }
-
-  void _syncActiveLine(Duration at) {
-    if (_lines.isEmpty) return;
-    final nextIndex = _findCurrentLineIndex(at);
-    if (nextIndex == _activeLineIndex) return;
-
-    _activeLineIndex = nextIndex;
-    if (mounted) {
-      setState(() {});
     }
   }
 
@@ -125,25 +115,21 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
   Future<void> _seekTo(double seconds) async {
     final position = Duration(milliseconds: (seconds * 1000).round());
     await _player.seek(position);
-    _syncActiveLine(position);
+    _positionNotifier.value = position;
   }
 
   Future<void> _seekRelative(Duration delta) async {
     final durMs = _duration.inMilliseconds;
-    final nextMs = _position.inMilliseconds + delta.inMilliseconds;
+    final nextMs =
+        _positionNotifier.value.inMilliseconds + delta.inMilliseconds;
     final ms = durMs > 0 ? nextMs.clamp(0, durMs) : max(0, nextMs);
+    _positionNotifier.value = Duration(milliseconds: ms);
     await _seekTo(ms / 1000);
-    if (mounted) {
-      setState(() => _position = Duration(milliseconds: ms));
-    }
   }
 
   Future<void> _replayFromStart() async {
     await _player.seek(Duration.zero);
-    _syncActiveLine(Duration.zero);
-    if (mounted) {
-      setState(() => _position = Duration.zero);
-    }
+    _positionNotifier.value = Duration.zero;
     await _player.play();
   }
 
@@ -152,22 +138,20 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
       _isSeeking = true;
       _seekingSeconds = value;
     });
-    _syncActiveLine(Duration(milliseconds: (value * 1000).round()));
   }
 
   void _onSeekChanged(double value) {
     if (!_isSeeking) return;
     setState(() => _seekingSeconds = value);
-    _syncActiveLine(Duration(milliseconds: (value * 1000).round()));
   }
 
   Future<void> _onSeekEnd(double value) async {
     final target = Duration(milliseconds: (value * 1000).round());
     setState(() {
-      _position = target;
       _isSeeking = false;
       _seekingSeconds = 0;
     });
+    _positionNotifier.value = target;
     await _seekTo(value);
   }
 
@@ -176,6 +160,7 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     _positionSub?.cancel();
     _durationSub?.cancel();
     _stateSub?.cancel();
+    _positionNotifier.dispose();
     _discRotationController.dispose();
     _player.dispose();
     super.dispose();
@@ -228,9 +213,36 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
                           ),
                           Expanded(
                             flex: 4,
-                            child: Center(child: _buildLyricPreview()),
+                            child: LayoutBuilder(
+                              builder: (context, lc) {
+                                return ValueListenableBuilder<Duration>(
+                                  valueListenable: _positionNotifier,
+                                  builder: (context, audioPos, _) {
+                                    final lyricTime =
+                                        _isSeeking
+                                            ? Duration(
+                                              milliseconds:
+                                                  (_seekingSeconds * 1000)
+                                                      .round(),
+                                            )
+                                            : audioPos;
+                                    return Center(
+                                      child: _buildLyricPreview(
+                                        lyricTime,
+                                        lc.maxWidth,
+                                      ),
+                                    );
+                                  },
+                                );
+                              },
+                            ),
                           ),
-                          _buildPlayerPanel(),
+                          ValueListenableBuilder<Duration>(
+                            valueListenable: _positionNotifier,
+                            builder: (context, audioPos, _) {
+                              return _buildPlayerPanel(audioPos);
+                            },
+                          ),
                         ],
                       ),
                     );
@@ -268,17 +280,16 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     );
   }
 
-  Widget _buildLyricPreview() {
+  Widget _buildLyricPreview(Duration lyricTime, double maxWidth) {
+    final active = _findCurrentLineIndex(lyricTime);
     final current =
-        _activeLineIndex >= 0 && _activeLineIndex < _lines.length
-            ? _lines[_activeLineIndex]
-            : null;
+        active >= 0 && active < _lines.length ? _lines[active] : null;
     final next =
-        _activeLineIndex + 1 >= 0 && _activeLineIndex + 1 < _lines.length
-            ? _lines[_activeLineIndex + 1]
+        active + 1 >= 0 && active + 1 < _lines.length
+            ? _lines[active + 1]
             : null;
     const currentLyricStyle = TextStyle(
-      color: Color(0xFF1F2937),
+      color: _lyricBaseCharColor,
       fontSize: _lyricFontSize,
       fontWeight: FontWeight.w700,
       height: 1.2,
@@ -287,43 +298,81 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        current == null
-            ? Text('...', style: currentLyricStyle)
-            : DefaultTextStyle(
-              style: currentLyricStyle,
-              child: Wrap(
-                alignment: WrapAlignment.center,
-                children:
-                    current.words
-                        .map(
-                          (word) =>
-                              _buildWordByCharacter(word, currentLyricStyle),
-                        )
-                        .toList(),
+        _PushingLyricLineSwitcher(
+          duration: _lyricLineSwitchDuration,
+          lineKey: active,
+          slidePixels: 22,
+          verticalGap: _lyricFontSize * 0.9,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: _lyricFontSize * 1.35),
+            child:
+                current == null
+                    ? SizedBox(
+                      width: maxWidth,
+                      child: Center(
+                        child: Text('...', style: currentLyricStyle),
+                      ),
+                    )
+                    : DefaultTextStyle(
+                      style: currentLyricStyle,
+                      child: SizedBox(
+                        width: maxWidth,
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          runAlignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 6,
+                          children:
+                              current.words
+                                  .map(
+                                    (word) => _buildWordByCharacter(
+                                      word,
+                                      currentLyricStyle,
+                                      lyricTime,
+                                    ),
+                                  )
+                                  .toList(),
+                        ),
+                      ),
+                    ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        _PushingLyricLineSwitcher(
+          duration: _lyricLineSwitchDuration,
+          lineKey: 'next_${active}_${next?.start.inMilliseconds ?? -1}',
+          slidePixels: 18,
+          verticalGap: _lyricFontSize * 0.75,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: _lyricFontSize * 1.35),
+            child: SizedBox(
+              width: maxWidth,
+              child: Text(
+                next == null ? '' : next.words.map((word) => word.text).join(),
+                textAlign: TextAlign.center,
+                softWrap: true,
+                style: const TextStyle(
+                  color: Color(0xFF6B7280),
+                  fontSize: _lyricFontSize,
+                  fontWeight: FontWeight.w500,
+                  height: 1.2,
+                ),
               ),
             ),
-        const SizedBox(height: 4),
-        Text(
-          next == null ? '' : next.words.map((word) => word.text).join(),
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Color(0xFF6B7280),
-            fontSize: _lyricFontSize,
-            fontWeight: FontWeight.w500,
-            height: 1.2,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildPlayerPanel() {
+  Widget _buildPlayerPanel(Duration audioPosition) {
     final durationSeconds =
         _duration.inMilliseconds <= 0 ? 1.0 : _duration.inMilliseconds / 1000;
-    final currentSeconds = (_position.inMilliseconds / 1000).clamp(
-      0.0,
-      durationSeconds,
-    );
+    final currentSeconds = ((_isSeeking
+            ? _seekingSeconds
+            : audioPosition.inMilliseconds / 1000))
+        .clamp(0.0, durationSeconds);
     final sliderSeconds =
         _isSeeking
             ? _seekingSeconds.clamp(0.0, durationSeconds)
@@ -448,17 +497,11 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     );
   }
 
-  Widget _buildLineAsOneChunk(LyricLine line, TextStyle textStyle) {
-    final content = line.words.map((word) => word.text).join();
-    final progress = line.progressAt(_position);
-    return _buildProgressText(
-      content: content,
-      progress: progress,
-      textStyle: textStyle,
-    );
-  }
-
-  Widget _buildWordByCharacter(LyricWord word, TextStyle textStyle) {
+  Widget _buildWordByCharacter(
+    LyricWord word,
+    TextStyle textStyle,
+    Duration now,
+  ) {
     final fragments =
         word.characters
             .asMap()
@@ -468,12 +511,18 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
                 entry.key,
                 entry.value,
                 word,
-                _position,
+                now,
                 textStyle,
               ),
             )
             .toList();
-    return Wrap(children: fragments);
+    return Wrap(
+      spacing: 0,
+      runSpacing: 0,
+      alignment: WrapAlignment.start,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: fragments,
+    );
   }
 
   Widget _buildCharacterFragment(
@@ -505,7 +554,7 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
         Text(
           content,
           style: textStyle.copyWith(
-            color: Colors.white70,
+            color: _lyricBaseCharColor,
             decoration: TextDecoration.none,
           ),
         ),
@@ -517,10 +566,24 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
               content,
               style: textStyle.copyWith(
                 decoration: TextDecoration.none,
+                shadows: const [
+                  Shadow(
+                    color: Color(0xE6FFFFFF),
+                    blurRadius: 3,
+                    offset: Offset(0, 0),
+                  ),
+                  Shadow(
+                    color: Color(0x4D000000),
+                    blurRadius: 0,
+                    offset: Offset(0, 1),
+                  ),
+                ],
                 foreground:
                     Paint()
                       ..shader = const LinearGradient(
-                        colors: [Color(0xFFFDE047), Color(0xFFF59E0B)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [Color(0xFF0F172A), Color(0xFF0C4A6E)],
                       ).createShader(const Rect.fromLTWH(0, 0, 220, 40)),
               ),
             ),
@@ -535,5 +598,105 @@ class _KaraokePlayerPageState extends State<KaraokePlayerPage>
     final minutes = (totalSeconds ~/ 60).toString().padLeft(2, '0');
     final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
+  }
+}
+
+class _PushingLyricLineSwitcher extends StatefulWidget {
+  const _PushingLyricLineSwitcher({
+    required this.duration,
+    required this.lineKey,
+    required this.child,
+    this.slidePixels = 20,
+    this.verticalGap = 14,
+  });
+
+  final Duration duration;
+  final Object lineKey;
+  final Widget child;
+  final double slidePixels;
+
+  final double verticalGap;
+
+  @override
+  State<_PushingLyricLineSwitcher> createState() =>
+      _PushingLyricLineSwitcherState();
+}
+
+class _PushingLyricLineSwitcherState extends State<_PushingLyricLineSwitcher>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  Widget? _incoming;
+  Widget? _outgoing;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: widget.duration);
+    _incoming = widget.child;
+    _controller.value = 1;
+    _controller.addStatusListener(_onAnimStatus);
+  }
+
+  void _onAnimStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && mounted) {
+      setState(() => _outgoing = null);
+    }
+  }
+
+  @override
+  void didUpdateWidget(_PushingLyricLineSwitcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.duration != oldWidget.duration) {
+      _controller.duration = widget.duration;
+    }
+    if (widget.lineKey != oldWidget.lineKey) {
+      _outgoing = _incoming;
+      _incoming = widget.child;
+      _controller.forward(from: 0);
+    } else {
+      _incoming = widget.child;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.removeStatusListener(_onAnimStatus);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final t = Curves.easeInOutCubic.transform(_controller.value);
+        final outOpacity = pow(1.0 - t, 1.35).toDouble().clamp(0.0, 1.0);
+        final inOpacity = t.clamp(0.0, 1.0);
+        final travel = widget.verticalGap + widget.slidePixels;
+
+        return Stack(
+          alignment: Alignment.center,
+          clipBehavior: Clip.none,
+          children: [
+            if (_outgoing != null && outOpacity > 0.001)
+              Opacity(
+                opacity: outOpacity,
+                child: Transform.translate(
+                  offset: Offset(0, -travel * t),
+                  child: _outgoing!,
+                ),
+              ),
+            Opacity(
+              opacity: inOpacity,
+              child: Transform.translate(
+                offset: Offset(0, travel * (1.0 - t)),
+                child: _incoming!,
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 }

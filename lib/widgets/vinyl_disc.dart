@@ -2,7 +2,6 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
-/// Dia than vector quay kem logo L nam ngoai ria dia (van quay theo dia).
 class VinylDisc extends StatelessWidget {
   const VinylDisc({
     super.key,
